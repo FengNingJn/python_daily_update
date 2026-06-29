@@ -1,0 +1,5 @@
+nga_cookies.json
+nga_daily_report.md
+images/
+*.json
+!nga_cookies.json
