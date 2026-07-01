@@ -1,16 +1,20 @@
-#!/usr/bin/env python31
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """NGA 全量/增量爬虫 → 统一归档到 nga_daily_report.md"""
 import os, re, json, time, sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 import requests
 
 OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_FILE = os.path.join(OUTPUT_DIR, "nga_cookies.json")
-DELAY = 0.5
-TODAY = datetime.now().strftime("%Y-%m-%d")
+THREAD_CACHE_FILE = os.path.join(OUTPUT_DIR, "thread_cache.json")
+DELAY = 0.1
+CACHE_TTL_DAYS = 7
+CST = timezone(timedelta(hours=8))
+TODAY = datetime.now(CST).strftime("%Y-%m-%d")
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
            "Accept-Language": "zh-CN,zh;q=0.9"}
 
@@ -100,38 +104,27 @@ def download_images(html_elems, tid):
     return img_map
 
 def total_pages(session, tid, authorid=None):
-    def curr(p):
-        url = f"https://ngabbs.com/read.php?tid={tid}"
-        if authorid: url += f"&authorid={authorid}"
-        if p > 1: url += f"&page={p}"
-        html = fetch(session, url)
-        if not html or 'ERROR:15' in html[:500]: return -1
-        m = re.search(r'__CURRENT_PAGE\s*=\s*(\d+)', html); return int(m.group(1)) if m else -1
-    if curr(1) != 1: return 1
+    url = f"https://ngabbs.com/read.php?tid={tid}"
+    if authorid: url += f"&authorid={authorid}"
+    html = fetch(session, url)
+    if not html or 'ERROR:15' in html[:500]: return 1
+    m = re.search(r'__CURRENT_PAGE\s*=\s*(\d+)', html)
+    p1 = int(m.group(1)) if m else 1
+    if p1 != 1: return 1
+    # 从页面中直接读总页数
+    m2 = re.search(r'共(\d+)页', html) or re.search(r'page=(\d+)[^"]*"[^>]*>\s*尾页', html)
+    if m2: return int(m2.group(1))
+    # fallback: 指数探测（仅首次）
     hi = 2
     while True:
-        a = curr(hi)
-        if a < 0: return 1
-        if a < hi: return a
+        h = fetch(session, url + f"&page={hi}")
+        if not h: return hi // 2
+        a = re.search(r'__CURRENT_PAGE\s*=\s*(\d+)', h)
+        cur = int(a.group(1)) if a else -1
+        if cur < 0: return 1
+        if cur < hi: return cur
         if hi > 500000: return hi
-        hi *= 2; time.sleep(0.15)
-
-def find_start(session, tid, authorid, target_date):
-    total = total_pages(session, tid, authorid)
-    if total <= 100: return 1
-    lo, hi = 1, total
-    while lo < hi:
-        mid = (lo + hi) // 2
-        url = f"https://ngabbs.com/read.php?tid={tid}"
-        if authorid: url += f"&authorid={authorid}"
-        if mid > 1: url += f"&page={mid}"
-        html = fetch(session, url)
-        if not html: lo = mid + 1; continue
-        m = re.search(r'(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}', html)
-        if m and m.group(1) >= target_date: hi = mid
-        else: lo = mid + 1
-        time.sleep(0.15)
-    return max(1, lo)
+        hi *= 2; time.sleep(0.1)
 
 # ═══ 帖子提取 ═══
 def extract_post(table, tid=""):
@@ -167,39 +160,69 @@ def extract_post(table, tid=""):
     return {'floor': floor, 'uid': uid, 'time': dt, 'content': text, 'quoted': quoted}
 
 # ═══ 爬取 ═══
+INC_LOOKBACK = 8  # 增量模式只取最后N页
+
+def _fetch_page(session, tid, page, author_uid):
+    url = f"https://ngabbs.com/read.php?tid={tid}"
+    if author_uid: url += f"&authorid={author_uid}"
+    if page > 1: url += f"&page={page}"
+    return fetch(session, url)
+
 def crawl(session, tid, author_uid=None, since_date=None):
     total = total_pages(session, tid, author_uid)
-    start = find_start(session, tid, author_uid, since_date) if since_date else 1
-    print(f"    [{start}/{total}]", end="")
-    
+    if since_date:
+        # 增量：直接取最后 INC_LOOKBACK 页，跳过二分定位
+        pages = list(range(max(1, total - INC_LOOKBACK + 1), total + 1))
+    else:
+        pages = list(range(1, total + 1))
+    print(f"    [{pages[0]}/{total}]", end="", flush=True)
+
     posts, seen = [], set()
-    for page in range(start, total + 1):
-        if page > start: time.sleep(DELAY)
-        url = f"https://ngabbs.com/read.php?tid={tid}"
-        if author_uid: url += f"&authorid={author_uid}"
-        if page > 1: url += f"&page={page}"
-        html = fetch(session, url)
-        if not html: continue
-        
-        page_had_before = False
+
+    def fetch_and_parse(page):
+        html = _fetch_page(session, tid, page, author_uid)
+        if not html: return []
+        result = []
         for table in BeautifulSoup(html, 'lxml').find_all('table', class_=re.compile(r'forumbox')):
             p = extract_post(table, tid)
             if not p: continue
             if author_uid and p['uid'] != author_uid: continue
-            if since_date and p['time'][:10] < since_date:
-                page_had_before = True; continue
-            key = p['content'][:80]
-            if key not in seen: seen.add(key); posts.append(p)
-        
-        if since_date and page_had_before and len(seen) > 0:
-            break  # already passed the date boundary
-        
-        if (page - start) % 50 == 0: print(f" {page}/{total}")
-    print(f" -> {len(posts)}条")
+            result.append(p)
+        return result
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = {ex.submit(fetch_and_parse, pg): pg for pg in pages}
+        for fut in as_completed(futures):
+            for p in fut.result():
+                if since_date and p['time'][:10] < since_date: continue
+                key = p['content'][:80]
+                if key not in seen: seen.add(key); posts.append(p)
+
+    posts.sort(key=lambda p: p['time'])
+    print(f" -> {len(posts)}条", flush=True)
     return posts
 
-def get_user_threads(session, uid):
-    """通过 searchpost=1 获取用户所有参与过的帖子，比只看他创建的帖更全面"""
+def _load_thread_cache():
+    if os.path.exists(THREAD_CACHE_FILE):
+        with open(THREAD_CACHE_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def _save_thread_cache(cache):
+    with open(THREAD_CACHE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+
+def get_user_threads(session, uid, force=False):
+    """通过 searchpost=1 获取用户所有参与过的帖子，结果缓存 CACHE_TTL_DAYS 天"""
+    cache = _load_thread_cache()
+    entry = cache.get(uid)
+    if not force and entry:
+        cached_date = entry.get('date', '')
+        days_old = (datetime.now(CST).date() - datetime.fromisoformat(cached_date).date()).days
+        if days_old < CACHE_TTL_DAYS:
+            print(f"  [缓存] {TRACKED_UIDS.get(uid, uid)} ({days_old}天前)", flush=True)
+            return entry['threads']
+
     threads, seen = [], set()
     for page in range(1, 20):
         html = fetch(session, f"https://ngabbs.com/thread.php?authorid={uid}&searchpost=1&fid=0&page={page}")
@@ -217,6 +240,9 @@ def get_user_threads(session, uid):
                         found = True
         if not found: break
         if page % 3 == 0: time.sleep(DELAY)
+
+    cache[uid] = {'date': TODAY, 'threads': threads}
+    _save_thread_cache(cache)
     return threads
 
 # ═══ 合并输出 ═══
@@ -682,7 +708,7 @@ def run(since_date=None):
     # 1. 指定帖子
     for tid, label in TRACKED_THREADS:
         print(f"\n[帖] {label} (tid={tid})")
-        for p in crawl(session, tid):
+        for p in crawl(session, tid, since_date=since_date):
             all_data[p['time'][:10]][p['uid']].append(p)
     
     # 2. 每个用户（全量保留完整历史）
@@ -712,29 +738,33 @@ def run(since_date=None):
         cnt = sum(len(all_data[d].get(uid, [])) for d in all_data)
         if cnt: print(f"  {TRACKED_UIDS.get(uid, uid)}: {cnt}条")
     
-    # 4. 市场数据采集 & 量价分析
-    market_text, indices, futs, flow, margin, limits = generate_market_report()
-    analysis_text = analyze_tomorrow(all_data, indices, futs, flow, margin, limits)
-    
-    # 追加到报告
+    # 4. 市场数据采集 & 量价分析（下午5点后且当天无缓存才采集）
+    now_cst = datetime.now(CST)
     report_path = os.path.join(OUTPUT_DIR, "nga_daily_report.md")
-    if os.path.exists(report_path):
-        with open(report_path, 'r', encoding='utf-8') as f:
-            existing = f.read()
-        # 删除旧的同日市场数据 & 展望
-        old_m = existing.find(f'\n\n## 每日市场数据 - {TODAY}')
-        if old_m < 0:
-            old_m = existing.find('\n\n## 每日市场数据 - ')
-        old_a = existing.find(f'\n\n## 明日展望 - {TODAY}')
-        if old_a < 0:
-            old_a = existing.find('\n\n## 明日展望 - ')
-        cut = min(old_m, old_a) if old_m > 0 and old_a > 0 else max(old_m, old_a)
-        if cut > 0:
-            existing = existing[:cut]
-        with open(report_path, 'w', encoding='utf-8') as f:
-            f.write(existing + market_text + analysis_text)
-    
-    print(f"\n[OK] 市场数据+明日展望已追加")
+    market_cached = os.path.exists(report_path) and f'## 每日市场数据 - {TODAY}' in open(report_path, encoding='utf-8').read()
+
+    if now_cst.hour >= 17 and not market_cached:
+        market_text, indices, futs, flow, margin, limits = generate_market_report()
+        analysis_text = analyze_tomorrow(all_data, indices, futs, flow, margin, limits)
+        if os.path.exists(report_path):
+            with open(report_path, 'r', encoding='utf-8') as f:
+                existing = f.read()
+            old_m = existing.find(f'\n\n## 每日市场数据 - {TODAY}')
+            if old_m < 0:
+                old_m = existing.find('\n\n## 每日市场数据 - ')
+            old_a = existing.find(f'\n\n## 明日展望 - {TODAY}')
+            if old_a < 0:
+                old_a = existing.find('\n\n## 明日展望 - ')
+            cut = min(old_m, old_a) if old_m > 0 and old_a > 0 else max(old_m, old_a)
+            if cut > 0:
+                existing = existing[:cut]
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(existing + market_text + analysis_text)
+        print(f"\n[OK] 市场数据+明日展望已追加")
+    elif market_cached:
+        print(f"\n[跳过] 市场数据今日已有缓存")
+    else:
+        print(f"\n[跳过] 市场数据：当前 {now_cst.strftime('%H:%M')} 未到17:00")
 
 if __name__ == '__main__':
     if not load_cookies(): print("[FAIL] 未找到 nga_cookies.json"); exit(1)
@@ -742,7 +772,7 @@ if __name__ == '__main__':
     inc = '--inc' in sys.argv or '-i' in sys.argv
     since = None
     if inc:
-        since = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+        since = TODAY
         for a in sys.argv:
             if a.startswith('--days='): since = (datetime.now() - timedelta(days=int(a.split('=')[1]))).strftime("%Y-%m-%d")
             elif a.startswith('--since='): since = a.split('=')[1]
