@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python31
 # -*- coding: utf-8 -*-
 """NGA 全量/增量爬虫 → 统一归档到 nga_daily_report.md"""
 import os, re, json, time, sys
