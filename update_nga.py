@@ -28,12 +28,34 @@ TRACKED_UIDS = {
     "61395264": "村上吹树", "66662897": "fuelish", "42162697": "包子music",
     "41505780": "绝望之诗", "66278813": "文乌", "67145714": "Plezl",
     "65329649": "zippo578", "557398": "海指导",
+    "26529713": "枫叶翎雨", "370218": "进击的猫猫头选手",
+    "41724123": "放狗放狗汪汪汪", "38906013": "德龙骑士",
+    "7068240": "wh773045290",
 }
-UID_ORDER = ["150058", "60916468", "21321600", "61395264", "66662897", "42162697", "41505780", "66278813", "67145714", "65329649", "557398"]
+UID_ORDER = [
+    "150058", "60916468", "21321600", "61395264", "66662897",
+    "42162697", "41505780", "66278813", "67145714", "65329649",
+    "557398", "26529713", "370218", "41724123", "38906013",
+    "7068240",
+]
 
 # 用户已知主帖（searchpost=1 可能漏掉的帖子）
 KNOWN_USER_THREADS = {
     "150058": [("45974302", "狼大-科学技术打头阵")],
+    "557398": [("45905087", "海指导-33586")],
+    "60916468": [("45974302", "灰兔尾-狼大楼"), ("45905087", "灰兔尾-海指导楼")],
+    "61395264": [("45974302", "村上吹树-狼大楼"), ("46872529", "村上吹树-主帖")],
+    "66662897": [("45905087", "fuelish-海指导楼")],
+    "42162697": [("45905087", "包子music-海指导楼")],
+    "21321600": [("45974302", "幸运阿sai-狼大楼")],
+    "41505780": [("45974302", "绝望之诗-狼大楼"), ("44279886", "绝望之诗-钱塘江"), ("46951726", "绝望之诗-中远海")],
+    "66278813": [("45974302", "文乌-狼大楼")],
+    "67145714": [("45974302", "Plezl-狼大楼")],
+    "65329649": [("45974302", "zippo578-狼大楼")],
+    "41724123": [
+        ("45974302", "放狗放狗汪汪汪-狼大楼"),
+        ("45905087", "放狗放狗汪汪汪-海指导楼"),
+    ],
 }
 
 # ═══ 工具 ═══
@@ -47,13 +69,13 @@ def create_session():
     for k, v in load_cookies().items(): s.cookies.set(k, v)
     return s
 
-def fetch(session, url, timeout=20):
-    for _ in range(3):
+def fetch(session, url, timeout=10):
+    for _ in range(2):
         try:
             r = session.get(url, timeout=timeout)
             if r.status_code == 403: return None
             if r.status_code == 200: return r.content.decode('gbk', errors='replace')
-            time.sleep(2)
+            time.sleep(1)
         except: time.sleep(1)
     return None
 
@@ -160,7 +182,8 @@ def extract_post(table, tid=""):
     return {'floor': floor, 'uid': uid, 'time': dt, 'content': text, 'quoted': quoted}
 
 # ═══ 爬取 ═══
-INC_LOOKBACK = 8  # 增量模式只取最后N页
+INC_LOOKBACK = 15  # 增量模式只取最后N页
+DAILY_USER_POST_LIMIT = 100  # 报告中每位关注用户每天最多输出条数
 
 def _fetch_page(session, tid, page, author_uid):
     url = f"https://ngabbs.com/read.php?tid={tid}"
@@ -224,8 +247,13 @@ def get_user_threads(session, uid, force=False):
             return entry['threads']
 
     threads, seen = [], set()
-    for page in range(1, 20):
-        html = fetch(session, f"https://ngabbs.com/thread.php?authorid={uid}&searchpost=1&fid=0&page={page}")
+    for page in range(1, 5):
+        # 保持与 NGA 用户发帖搜索页的原始参数格式一致；额外的 fid=0
+        # 在部分用户或限流状态下可能返回空页。
+        url = f"https://bbs.nga.cn/thread.php?searchpost=1&authorid={uid}"
+        if page > 1:
+            url += f"&page={page}"
+        html = fetch(session, url)
         if not html or len(html) < 5000: continue
         found = False
         for a in BeautifulSoup(html, 'lxml').find_all('a', href=True):
@@ -241,23 +269,22 @@ def get_user_threads(session, uid, force=False):
         if not found: break
         if page % 3 == 0: time.sleep(DELAY)
 
-    cache[uid] = {'date': TODAY, 'threads': threads}
-    _save_thread_cache(cache)
+    # 空结果不缓存，避免下次跳过searchpost导致永远抓不到
+    if threads:
+        cache[uid] = {'date': TODAY, 'threads': threads}
+        _save_thread_cache(cache)
     return threads
 
 # ═══ 合并输出 ═══
 def merge_to_report(all_data, mode="全量"):
     report_path = os.path.join(OUTPUT_DIR, "nga_daily_report.md")
-    
-    lines = [f"\n\n---\n\n# 全量历史归档（按日期+按人）\n"]
-    total = sum(len(vv) for v in all_data.values() for vv in v.values())
-    lines.append(f"> 更新: {TODAY} | 模式: {mode} | {len(all_data)}天 | {total}条\n\n")
-    
+
+    new_days = {}
     for date in sorted(all_data.keys()):
         by_uid = all_data[date]
-        day_total = sum(len(v) for v in by_uid.values())
-        lines.append(f"### {date} ({day_total}条)\n")
-        
+        day_total = 0
+        lines = []
+
         for uid in UID_ORDER:
             if uid not in by_uid: continue
             posts = by_uid[uid]
@@ -265,29 +292,62 @@ def merge_to_report(all_data, mode="全量"):
             for p in posts:
                 k = p['content'][:60]
                 if k not in seen: seen.add(k); unique.append(p)
-            
+
             name = TRACKED_UIDS.get(uid, f"UID:{uid}")
             lines.append(f"**{name}** ({len(unique)}条)\n")
-            for p in unique[:20]:
+            displayed = unique[:DAILY_USER_POST_LIMIT]
+            day_total += len(displayed)
+            for p in displayed:
                 c = p['content'].replace('\n', ' \n ')
                 l = f"- [{p['time'][11:16]}] {c}"
                 if p['quoted']: l += f"  [引用: {p['quoted'][:80]}]"
                 lines.append(l)
             lines.append("")
+        lines.insert(0, f"### {date} ({day_total}条)\n")
         lines.append("---\n")
-    
-    new_section = '\n'.join(lines)
-    
+        new_days[date] = '\n'.join(lines)
+
+    archive_marker = "\n\n---\n\n# 全量历史归档（按日期+按人）"
+    existing = ""
+    prefix = "# NGA 历史归档\n"
+    suffix = ""
+
     if os.path.exists(report_path):
         with open(report_path, 'r', encoding='utf-8') as f:
             existing = f.read()
-        old = existing.find("\n\n---\n\n# 全量历史归档")
-        if old > 0: existing = existing[:old] + new_section
-        else: existing += new_section
-        with open(report_path, 'w', encoding='utf-8') as f: f.write(existing)
-    else:
-        with open(report_path, 'w', encoding='utf-8') as f:
-            f.write("# NGA 历史归档\n\n" + new_section)
+        old = existing.find(archive_marker)
+        if old >= 0:
+            prefix = existing[:old]
+            archive_end_candidates = [
+                pos for marker in ("\n\n## 每日市场数据 - ", "\n\n## 明日展望 - ")
+                if (pos := existing.find(marker, old + len(archive_marker))) >= 0
+            ]
+            archive_end = min(archive_end_candidates) if archive_end_candidates else len(existing)
+            suffix = existing[archive_end:]
+
+            if mode == "增量":
+                old_archive = existing[old:archive_end]
+                day_pattern = re.compile(
+                    r"(?ms)^### (\d{4}-\d{2}-\d{2}) \(\d+条\)\n.*?"
+                    r"(?=^### \d{4}-\d{2}-\d{2} \(\d+条\)\n|\Z)"
+                )
+                old_days = {m.group(1): m.group(0).rstrip() for m in day_pattern.finditer(old_archive)}
+                old_days.update(new_days)
+                new_days = old_days
+
+    total = 0
+    for section in new_days.values():
+        m = re.match(r"### \d{4}-\d{2}-\d{2} \((\d+)条\)", section)
+        if m: total += int(m.group(1))
+
+    header = (
+        f"{archive_marker}\n"
+        f"> 更新: {TODAY} | 模式: {mode} | {len(new_days)}天 | {total}条\n\n"
+    )
+    new_section = header + '\n'.join(new_days[date].rstrip() for date in sorted(new_days)) + "\n"
+
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write(prefix + new_section + suffix)
 
 # ═══════════════════════════════════════════════
 # 每日市场数据采集
@@ -324,6 +384,44 @@ def get_indices():
                 'amount_yi': data.get('f48', 0) / 1e8,
                 'change_pct': data.get('f170', 0) / 100,
             }
+
+    # 东方财富接口偶发不可用时，使用新浪全量行情补齐指数。
+    sina_codes = {
+        '上证指数': 'sh000001', '深证成指': 'sz399001', '创业板指': 'sz399006',
+        '科创50': 'sh000688', '沪深300': 'sh000300', '中证1000': 'sh000852',
+    }
+    missing = {name: code for name, code in sina_codes.items() if name not in result}
+    if missing:
+        try:
+            s = requests.Session()
+            s.trust_env = False
+            r = s.get(
+                'https://hq.sinajs.cn/list=' + ','.join(missing.values()),
+                headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn'},
+                timeout=15,
+            )
+            text = r.content.decode('gbk', errors='replace')
+            for name, code in missing.items():
+                m = re.search(rf'hq_str_{code}="([^"]*)"', text)
+                if not m:
+                    continue
+                parts = m.group(1).split(',')
+                if len(parts) < 10:
+                    continue
+                prev_close = float(parts[2]) if parts[2] else 0
+                price = float(parts[3]) if parts[3] else 0
+                if not price:
+                    continue
+                result[name] = {
+                    'price': price,
+                    'high': float(parts[4]) if parts[4] else 0,
+                    'low': float(parts[5]) if parts[5] else 0,
+                    'volume': float(parts[8]) if parts[8] else 0,
+                    'amount_yi': (float(parts[9]) / 1e8) if parts[9] else 0,
+                    'change_pct': ((price - prev_close) / prev_close * 100) if prev_close else 0,
+                }
+        except Exception:
+            pass
     return result
 
 
@@ -531,16 +629,22 @@ def analyze_tomorrow(all_data, indices, futs, flow, margin, limits):
 
     sh_chg = sh.get('change_pct', 0)
     sh_amt = sh.get('amount_yi', 0)
+    have_spot_data = bool(sh) and sh_amt > 0
 
-    # 判断放量/缩量：成交额 > 1.5万亿 算放量
-    vol_level = "放量" if sh_amt > 15000 else "缩量" if sh_amt < 10000 else "平量"
-    direction = "上涨" if sh_chg > 0.5 else "下跌" if sh_chg < -0.5 else "震荡"
-
-    lines.append(f"- 上证: {direction} {sh_chg:+.2f}%, 成交{sh_amt:.0f}亿 ({vol_level})")
+    if have_spot_data:
+        # 判断放量/缩量：成交额 > 1.5万亿 算放量
+        vol_level = "放量" if sh_amt > 15000 else "缩量" if sh_amt < 10000 else "平量"
+        direction = "上涨" if sh_chg > 0.5 else "下跌" if sh_chg < -0.5 else "震荡"
+        lines.append(f"- 上证: {direction} {sh_chg:+.2f}%, 成交{sh_amt:.0f}亿 ({vol_level})")
+    else:
+        vol_level = direction = None
+        lines.append("- 指数现货数据获取失败，本节不作量价判断")
 
     # 量价组合判断
     signals = []
-    if direction == "下跌" and vol_level == "放量":
+    if not have_spot_data:
+        pass
+    elif direction == "下跌" and vol_level == "放量":
         signals.append("放量下跌 = 恐慌抛压，短期偏空，关注次日是否缩量止跌")
     elif direction == "下跌" and vol_level == "缩量":
         signals.append("缩量下跌 = 惜售情绪，可能接近短期底部")
@@ -633,7 +737,9 @@ def analyze_tomorrow(all_data, indices, futs, flow, margin, limits):
     score = 0
     reasons = []
 
-    if sh_chg > 0.5:
+    if not have_spot_data:
+        reasons.append("指数数据缺失")
+    elif sh_chg > 0.5:
         score += 1; reasons.append("指数收涨")
     elif sh_chg < -0.5:
         score -= 1; reasons.append("指数收跌")
@@ -741,7 +847,14 @@ def run(since_date=None):
     # 4. 市场数据采集 & 量价分析（下午5点后且当天无缓存才采集）
     now_cst = datetime.now(CST)
     report_path = os.path.join(OUTPUT_DIR, "nga_daily_report.md")
-    market_cached = os.path.exists(report_path) and f'## 每日市场数据 - {TODAY}' in open(report_path, encoding='utf-8').read()
+    report_content = ""
+    if os.path.exists(report_path):
+        with open(report_path, encoding='utf-8') as f:
+            report_content = f.read()
+    market_cached = (
+        f'## 每日市场数据 - {TODAY}' in report_content
+        and '指数现货数据获取失败' not in report_content
+    )
 
     if now_cst.hour >= 17 and not market_cached:
         market_text, indices, futs, flow, margin, limits = generate_market_report()
