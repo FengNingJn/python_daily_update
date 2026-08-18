@@ -1,0 +1,44 @@
+timezone: Asia/Shanghai
+cookie_file: config/bilibili_cookies.txt
+
+baseline:
+  days: 3
+  max_videos_per_creator: 3
+
+fetch:
+  page_size: 10
+  backfill_page_size: 50
+  backfill_delay_seconds: 0.25
+  transcript_delay_seconds: 0.20
+  revision_check_days: 7
+  revision_check_limit: 3
+  request_timeout_seconds: 25
+  retries: 3
+  retry_backoff_seconds: 2
+
+subtitles:
+  # Human-authored Chinese captions are preferred when present. Bilibili's
+  # ai-zh/ai-en tracks and the AI-conclusion transcript come before Whisper.
+  preferred_languages:
+    - zh-CN
+    - zh-Hans
+    - ai-zh
+    - zh
+    - ai-en
+    - en-US
+    - en
+
+whisper:
+  enabled: true
+  model: small
+  device: cpu
+  compute_type: int8
+  language: zh
+
+ai:
+  max_chunk_chars: 18000
+  recent_view_context: 5
+  timeout_seconds: 120
+
+output:
+  keep_audio: false

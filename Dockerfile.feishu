@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    TZ=Asia/Shanghai \
+    NGA_OUTPUT_DIR=/data \
+    BOT_DB_FILE=/bot-state/feishu_bot.db
+
+WORKDIR /app
+
+COPY requirements-feishu.txt /app/requirements-feishu.txt
+COPY wheels-feishu /wheels-feishu
+RUN pip install --no-cache-dir --no-index --find-links=/wheels-feishu -r /app/requirements-feishu.txt
+
+COPY nas_runner.py message_hub.py feishu_bot.py /app/
+
+CMD ["python", "/app/feishu_bot.py"]

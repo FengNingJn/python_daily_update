@@ -1,0 +1,123 @@
+services:
+  nga-updater:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local/nga-updater:1.0
+    container_name: nga-updater
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      NGA_OUTPUT_DIR: /data
+      NGA_CONFIG_FILE: /data/config.json
+      NGA_STATE_FILE: /state/push_state.json
+      NGA_LOG_FILE: /logs/nas_runner.log
+      NGA_LOCK_FILE: /state/update.lock
+    volumes:
+      - ./data:/data
+      - ./state:/state
+      - ./logs:/logs
+    command: ["python", "/app/nas_runner.py", "--loop", "--interval", "300"]
+
+  nga-feishu-bot:
+    profiles: ["feishu"]
+    build:
+      context: .
+      dockerfile: Dockerfile.feishu
+    image: local/nga-feishu-bot:1.0
+    container_name: nga-feishu-bot
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      NGA_OUTPUT_DIR: /data
+      BOT_DB_FILE: /bot-state/feishu_bot.db
+      BOT_BACKUP_DIR: /bot-backups
+      BOT_AI_CONFIG_FILE: /bot-state/ai_config.json
+      BOT_AI_MEMORY_FILE: /bot-state/ai_memory.md
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_ALLOWED_OPEN_IDS: ${FEISHU_ALLOWED_OPEN_IDS:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-terra}
+      OPENAI_API_MODE: ${OPENAI_API_MODE:-auto}
+      BOT_WATCH_AUTHORS: ${BOT_WATCH_AUTHORS:-狼大,灰兔尾,幸运阿sai,村上吹树,fuelish,包子music,绝望之诗,文乌,Plezl,zippo578,海指导,枫叶翎雨,进击的猫猫头选手,放狗放狗汪汪汪,德龙骑士,wh773045290,铁锤狂砸盘,UID60433488,丨阿疯}
+      BOT_INDEX_INTERVAL: ${BOT_INDEX_INTERVAL:-30}
+      BOT_MAX_TOOL_ROUNDS: ${BOT_MAX_TOOL_ROUNDS:-6}
+    volumes:
+      - ./data:/data:ro
+      - ./bot-state:/bot-state
+      - ./bot-backups:/bot-backups
+    command: ["python", "/app/feishu_bot.py"]
+
+  arkvol-pusher:
+    image: local/nga-updater:1.0
+    container_name: arkvol-pusher
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      ARKVOL_SKILL_DIR: /skill
+      NGA_CONFIG_FILE: /data/config.json
+      ARKVOL_PUSH_STATE: /state/arkvol_push_state.json
+      MESSAGE_HUB_DB_FILE: /bot-state/feishu_bot.db
+      ARKVOL_RETRY_DELAY_SECONDS: ${ARKVOL_RETRY_DELAY_SECONDS:-300}
+      ARKVOL_MAX_ATTEMPTS: ${ARKVOL_MAX_ATTEMPTS:-5}
+    volumes:
+      - /volume1/docker/arkvol-skill:/skill:ro
+      - /var/services/homes/nfeng/.arkvol:/root/.arkvol:ro
+      - ./arkvol_push.py:/app/arkvol_push.py:ro
+      - ./message_hub.py:/app/message_hub.py:ro
+      - ./data:/data:ro
+      - ./arkvol-state:/state
+      - ./bot-state:/bot-state
+    command: ["python", "/app/arkvol_push.py", "--loop"]
+
+  portfolio-risk-pusher:
+    image: local/nga-updater:1.0
+    container_name: portfolio-risk-pusher
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      PORTFOLIO_APP_TOKEN: S5lfbSNSzaJ65ns0LblcpkO4nYz
+      PORTFOLIO_HOLDINGS_TABLE_ID: tblprTmIHdFzi1GH
+      PORTFOLIO_LOG_TABLE_ID: tblRA7YYZxmUBK76
+      PORTFOLIO_STATE_FILE: /state/portfolio_risk_state.json
+      PORTFOLIO_LOG_FILE: /logs/portfolio_risk.log
+      PORTFOLIO_PUSH_HOURS: 8,17
+      PORTFOLIO_POLL_SECONDS: "30"
+      MESSAGE_HUB_DB_FILE: /bot-state/feishu_bot.db
+    volumes:
+      - ./portfolio_risk.py:/app/portfolio_risk.py:ro
+      - ./message_hub.py:/app/message_hub.py:ro
+      - ./portfolio-state:/state
+      - ./logs:/logs
+      - ./bot-state:/bot-state
+    command: ["python", "/app/portfolio_risk.py", "--loop"]
+
+  bilibili-digest:
+    build:
+      context: .
+      dockerfile: bilibili-digest/Dockerfile.nas
+    image: local/bilibili-digest:1.0
+    container_name: bilibili-digest
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      BILIBILI_DATA_ROOT: /data
+      BILIBILI_CONFIG_DIR: /app/config
+      BILIBILI_COOKIE_FILE: /secrets/bilibili_cookies.txt
+      BILIBILI_NAS_STATE_FILE: /data/state/nas_service_state.json
+      BILIBILI_NAS_LOG_FILE: /data/logs/nas_service.log
+      BILIBILI_AI_CONFIG_FILE: /bot-state/ai_config.json
+      MESSAGE_HUB_DB_FILE: /bot-state/feishu_bot.db
+      BILIBILI_COLLECT_INTERVAL_HOURS: "2"
+      BILIBILI_REPORT_SLOTS: 08:00,21:00
+      BILIBILI_SERVICE_POLL_SECONDS: "30"
+      BILIBILI_SUBTITLE_RETRY_DAYS: "7"
+    volumes:
+      - ./bilibili-data:/data
+      - ./bilibili-secrets:/secrets:ro
+      - ./bot-state:/bot-state
+    command: ["python", "/app/nas_service.py", "--loop"]
