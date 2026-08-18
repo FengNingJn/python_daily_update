@@ -1,0 +1,10 @@
+data/
+state/
+logs/
+images/
+nga_cookies.json
+nga_daily_report.md
+thread_cache.json
+config.json
+*.pyc
+__pycache__/

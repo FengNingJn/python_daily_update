@@ -1,0 +1,25 @@
+{
+  "interval_seconds": 300,
+  "update_days": 1,
+  "update_timeout_seconds": 270,
+  "watch_authors": [
+    "狼大",
+    "海指导",
+    "灰兔尾",
+    "zippo578",
+    "Plezl",
+    "村上吹树",
+    "fuelish",
+    "铁锤狂砸盘",
+    "丨阿疯"
+  ],
+  "max_items_per_push": 30,
+  "max_chars_per_push": 5000,
+  "max_bytes_per_push": 3500,
+  "push": {
+    "provider": "none",
+    "serverchan_sendkey": "",
+    "ntfy_server": "https://ntfy.sh",
+    "ntfy_topic": ""
+  }
+}

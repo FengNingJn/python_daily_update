@@ -2,4 +2,52 @@ nga_cookies.json
 nga_daily_report.md
 images/
 *.json
-!nga_cookies.json
+!config.example.json
+logs/
+state/
+bot-state/
+.env
+.env.*
+*.env
+!feishu.env.example
+secrets/
+config.nas.json
+ai_memory.md
+
+# Python/runtime artifacts
+__pycache__/
+*.py[cod]
+*.db
+*.db-*
+*.sqlite*
+
+# NAS runtime data and preserved deployments
+.deploy-*/
+.deploy-staging/
+backups/
+*-backups/
+deployment-backups/
+history-imports/
+arkvol-state/
+portfolio-state/
+data/
+wheels/
+wheels-feishu/
+
+# Bilibili runtime output and secrets
+bilibili-data/
+bilibili-secrets/
+bilibili-digest/data/
+bilibili-digest/logs/
+bilibili-digest/state/
+bilibili-digest/transcripts/
+bilibili-digest/summaries/
+bilibili-digest/digests/
+bilibili-digest/secrets/
+bilibili-digest/wheels/
+
+# Generated NGA archives/reports
+UID_*.md
+tier1_*.md
+nga_page_*.html
+nga_page_*.md

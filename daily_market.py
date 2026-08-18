@@ -52,10 +52,20 @@ def get_indices():
 
 
 def get_futures():
+    trade_date = datetime.strptime(TODAY, "%Y-%m-%d").date()
+    first_day = trade_date.replace(day=1)
+    third_friday = 1 + (4 - first_day.weekday()) % 7 + 14
+    contract_year, contract_month = trade_date.year, trade_date.month
+    if trade_date.day >= third_friday:
+        contract_month += 1
+        if contract_month == 13:
+            contract_year += 1
+            contract_month = 1
+    suffix = f"{contract_year % 100:02d}{contract_month:02d}"
     contracts = {
-        'IF(沪深300)': 'CFF_RE_IF2607',
-        'IH(上证50)': 'CFF_RE_IH2607',
-        'IM(中证1000)': 'CFF_RE_IM2607',
+        'IF(沪深300)': f'CFF_RE_IF{suffix}',
+        'IH(上证50)': f'CFF_RE_IH{suffix}',
+        'IM(中证1000)': f'CFF_RE_IM{suffix}',
     }
     result = {}
     s = requests.Session()
