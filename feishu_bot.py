@@ -40,9 +40,13 @@ WATCH_AUTHORS = {
     item.strip()
     for item in os.environ.get(
         "BOT_WATCH_AUTHORS",
-        "狼大,灰兔尾,幸运阿sai,村上吹树,fuelish,包子music,绝望之诗,文乌,Plezl,zippo578,海指导,枫叶翎雨,进击的猫猫头选手,放狗放狗汪汪汪,德龙骑士,wh773045290,铁锤狂砸盘,UID60433488,丨阿疯",
+        "狼大,灰兔尾,幸运阿sai,村上吹树,fuelish,包子music,绝望之诗,文乌,Plezl,zippo578,海指导,枫叶翎雨,进击的猫猫头选手,放狗放狗汪汪汪,德龙骑士,wh773045290,铁锤狂砸盘,UID60433488,丨阿疯,佛山顺德东华路,tinyhuang123",
     ).split(",")
     if item.strip()
+}
+AUTHOR_ALIASES = {
+    "UID67218245": "佛山顺德东华路",
+    "UID62137447": "tinyhuang123",
 }
 ALLOWED_OPEN_IDS = {
     item.strip()
@@ -146,6 +150,85 @@ def connect_db():
     return db
 
 
+def normalize_author(author):
+    value = str(author or "").strip()
+    return AUTHOR_ALIASES.get(value, value)
+
+
+def migrate_author_aliases():
+    """Rename legacy UID aliases without splitting one author into two histories."""
+    post_changes = 0
+    event_changes = 0
+    with connect_db() as db:
+        for old_author, new_author in AUTHOR_ALIASES.items():
+            rows = db.execute(
+                "SELECT * FROM posts WHERE author=? ORDER BY post_date,post_time",
+                (old_author,),
+            ).fetchall()
+            for row in rows:
+                event_time = f"{row['post_date']}T{row['post_time']}"
+                if len(str(row["post_time"]).split(":")) == 2:
+                    event_time += ":00"
+                event_time += "+08:00"
+                new_key = message_hub.stable_event_dedupe_key(
+                    "nga", "forum_post", event_time, new_author, row["text"]
+                )
+                existing = db.execute(
+                    "SELECT notified FROM posts WHERE post_key=?", (new_key,)
+                ).fetchone()
+                if existing and new_key != row["post_key"]:
+                    db.execute(
+                        "UPDATE posts SET notified=? WHERE post_key=?",
+                        (max(int(existing["notified"]), int(row["notified"])), new_key),
+                    )
+                    db.execute("DELETE FROM posts WHERE post_key=?", (row["post_key"],))
+                else:
+                    db.execute(
+                        "UPDATE posts SET post_key=?,author=? WHERE post_key=?",
+                        (new_key, new_author, row["post_key"]),
+                    )
+                post_changes += 1
+
+            events = db.execute(
+                "SELECT * FROM events WHERE source='nga' AND author=? ORDER BY event_time",
+                (old_author,),
+            ).fetchall()
+            for row in events:
+                title = str(row["title"] or "").replace(old_author, new_author)
+                try:
+                    tags = json.loads(row["tags_json"] or "[]")
+                except json.JSONDecodeError:
+                    tags = []
+                tags = sorted(
+                    {new_author if str(item).strip() == old_author else str(item).strip()
+                     for item in tags if str(item).strip()}
+                )
+                dedupe_key = message_hub.stable_event_dedupe_key(
+                    row["source"], row["event_type"], row["event_time"],
+                    new_author, row["content"],
+                )
+                content_hash = message_hub.content_hash(
+                    row["source"], row["event_type"], new_author, title, row["content"]
+                )
+                db.execute(
+                    """
+                    UPDATE events
+                    SET author=?,title=?,tags_json=?,content_hash=?,dedupe_key=?
+                    WHERE event_id=?
+                    """,
+                    (
+                        new_author, title,
+                        json.dumps(tags, ensure_ascii=False, separators=(",", ":")),
+                        content_hash, dedupe_key, row["event_id"],
+                    ),
+                )
+                event_changes += 1
+        db.commit()
+    if post_changes or event_changes:
+        log(f"作者别名迁移完成：posts={post_changes}，events={event_changes}")
+    return post_changes, event_changes
+
+
 def get_setting(db, key, default=""):
     row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
@@ -181,6 +264,8 @@ def index_report():
         event_inserted = 0
         queued = 0
         for post in posts:
+            post = dict(post)
+            post["author"] = normalize_author(post.get("author"))
             event_time = f"{post['date']}T{post['time']}"
             if len(post["time"].split(":")) == 2:
                 event_time += ":00"
@@ -1111,6 +1196,7 @@ def main():
         raise SystemExit("缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET")
     load_runtime_ai_config()
     connect_db().close()
+    migrate_author_aliases()
     index_report()
     backup_if_due()
     threading.Thread(target=index_loop, daemon=True).start()
